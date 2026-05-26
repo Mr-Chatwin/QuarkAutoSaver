@@ -11,7 +11,53 @@ dp = Dispatcher()
 processor = Processor()
 
 # Store search cache to separate user/message states
-search_cache = {}
+import time
+from collections import OrderedDict
+from threading import Lock
+
+class SimpleTTLCache:
+    def __init__(self, maxsize=1000, ttl=1800):
+        self.maxsize = maxsize
+        self.ttl = ttl
+        self.cache = OrderedDict()
+        self.lock = Lock()
+
+    def get(self, key, default=None):
+        with self.lock:
+            if key not in self.cache:
+                return default
+            val, expiry = self.cache[key]
+            if time.time() > expiry:
+                del self.cache[key]
+                return default
+            # Move to end (LRU behavior)
+            self.cache.move_to_end(key)
+            return val
+
+    def __setitem__(self, key, value):
+        with self.lock:
+            now = time.time()
+            # Clean expired items first
+            expired_keys = [k for k, (_, exp) in self.cache.items() if now > exp]
+            for k in expired_keys:
+                del self.cache[k]
+            
+            # If still over limit, pop oldest (LRU)
+            if len(self.cache) >= self.maxsize:
+                self.cache.popitem(last=False)
+            
+            self.cache[key] = (value, now + self.ttl)
+
+    def __getitem__(self, key):
+        val = self.get(key)
+        if val is None:
+            raise KeyError(key)
+        return val
+
+    def __contains__(self, key):
+        return self.get(key) is not None
+
+search_cache = SimpleTTLCache(maxsize=1000, ttl=1800)
 
 import os
 import re
@@ -106,7 +152,8 @@ async def cmd_search(message: types.Message):
         return
 
     await message.answer(f"Searching for '{query}'...")
-    results = processor.process_query(query)
+    loop = asyncio.get_event_loop()
+    results = await loop.run_in_executor(None, processor.process_query, query)
     
     if not results:
         await message.answer("No resources found or TMDB match failed.")

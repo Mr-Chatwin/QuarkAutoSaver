@@ -20,13 +20,15 @@ async def startup_event():
     asyncio.create_task(start_bot())
 
 @app.post("/api/search")
-def search(req: SearchRequest):
-    results = processor.process_query(req.query)
+async def search(req: SearchRequest):
+    loop = asyncio.get_event_loop()
+    results = await loop.run_in_executor(None, processor.process_query, req.query)
     return {"results": results}
 
 @app.post("/api/save")
-def save(req: SaveRequest):
-    result = processor.save_and_rename(req.shareurl, req.media_info)
+async def save(req: SaveRequest):
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, processor.save_and_rename, req.shareurl, req.media_info)
     return {"message": result}
 
 @app.get("/")
