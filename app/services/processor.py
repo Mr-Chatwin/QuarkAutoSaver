@@ -34,8 +34,8 @@ class Processor:
                 current_parent_id = new_fid
         return current_parent_id
 
-    def parse_season(self, *texts: str) -> int:
-        """Helper to parse season number from given texts, default to 1"""
+    def parse_season(self, *texts: str, default_to_one: bool = True) -> Optional[int]:
+        """Helper to parse season number from given texts, default to 1 if default_to_one is True"""
         cn_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10}
         for text in texts:
             if not text:
@@ -54,7 +54,8 @@ class Processor:
                 if val.isdigit():
                     return int(val)
                 return cn_map.get(val, 1)
-        return 1
+        return 1 if default_to_one else None
+
 
     def guess_episode(self, filename: str) -> str:
         """Extracts EP number, e.g. E01 from various formats"""
@@ -346,32 +347,11 @@ class Processor:
                     if scraped:
                         print(f"[Processor] DeepSeek Fallback Success! Matched: {scraped['title']} ({scraped['year']})")
             
+            # Extract canonical title, year, and media type
             if scraped:
                 title = scraped.get("title")
                 year = scraped.get("year")
                 mtype = scraped.get("type")
-                emby_title = f"{title} ({year})" if year else title
-                
-                if mtype == "movie":
-                    path = ["Movies", emby_title]
-                    expected_name = f"{emby_title}.{ext}"
-                else: # tv
-                    season_num = (llm_res.get("season") if llm_res else None) or self.parse_season(title, orig_name, *parent_folders)
-                    path = ["TV", emby_title, f"Season {season_num:02d}"]
-                    llm_ep = llm_res.get("episode") if llm_res else None
-                    if llm_ep is not None:
-                        ep = f"E{llm_ep:02d}"
-                        vf["ep_num"] = llm_ep
-                    else:
-                        ep = self.guess_episode(orig_name)
-                        if ep:
-                            m_ep = re.match(r'^E(\d+)$', ep, re.IGNORECASE)
-                            if m_ep:
-                                vf["ep_num"] = int(m_ep.group(1))
-                    if ep:
-                        expected_name = f"{emby_title} - S{season_num:02d}{ep}.{ext}"
-                    else:
-                        expected_name = f"{emby_title} - {orig_name}"
             elif llm_res and llm_res.get("title"):
                 title = llm_res["title"]
                 year = llm_res.get("year")
@@ -379,59 +359,68 @@ class Processor:
                     mtype = "tv"
                 else:
                     mtype = search_type
-                    
-                emby_title = f"{title} ({year})" if year else title
-                if mtype == "movie":
-                    path = ["Movies", emby_title]
+            else:
+                title = search_title
+                year = search_year
+                mtype = search_type
+
+            emby_title = f"{title} ({year})" if year else title
+
+            # Determine saving path and expected Emby standard name
+            if mtype == "movie":
+                path = ["Movies", emby_title]
+                if len(video_files) > 1 and not scraped and not (llm_res and llm_res.get("title")):
+                    file_idx = video_files.index(vf) + 1
+                    expected_name = f"{emby_title} - Part {file_idx}.{ext}"
+                else:
                     expected_name = f"{emby_title}.{ext}"
-                else: # tv
-                    season_num = llm_res.get("season") or self.parse_season(title, orig_name, *parent_folders)
-                    path = ["TV", emby_title, f"Season {season_num:02d}"]
-                    ep_num = llm_res.get("episode")
-                    if ep_num is not None:
-                        ep = f"E{ep_num:02d}"
-                        vf["ep_num"] = ep_num
+            else: # tv
+                # Priority: local deterministic rules first
+                local_season = self.parse_season(orig_name, *parent_folders, default_to_one=False)
+                local_ep = self.guess_episode(orig_name)
+                
+                local_ep_num = None
+                if local_ep:
+                    m_ep = re.match(r'^E(\d+)$', local_ep, re.IGNORECASE)
+                    if m_ep:
+                        local_ep_num = int(m_ep.group(1))
+
+                # Season logic
+                if local_season is not None:
+                    season_num = local_season
+                elif llm_res and llm_res.get("season") is not None:
+                    llm_season = llm_res.get("season")
+                    # If LLM parsed season matches the episode number parsed locally, it is likely a misidentification
+                    if local_ep_num is not None and llm_season == local_ep_num:
+                        print(f"[Processor] Safety override: LLM season {llm_season} matches local episode number {local_ep_num}. Discarding LLM season.")
+                        season_num = search_season
                     else:
-                        ep = self.guess_episode(orig_name)
-                        if ep:
-                            m_ep = re.match(r'^E(\d+)$', ep, re.IGNORECASE)
-                            if m_ep:
-                                vf["ep_num"] = int(m_ep.group(1))
-                    if ep:
-                        expected_name = f"{emby_title} - S{season_num:02d}{ep}.{ext}"
+                        season_num = llm_season
+                else:
+                    season_num = search_season
+                
+                path = ["TV", emby_title, f"Season {season_num:02d}"]
+
+                # Episode logic
+                if local_ep:
+                    ep = local_ep
+                    vf["ep_num"] = local_ep_num
+                elif llm_res and llm_res.get("episode") is not None:
+                    llm_ep = llm_res.get("episode")
+                    ep = f"E{llm_ep:02d}"
+                    vf["ep_num"] = llm_ep
+                else:
+                    ep = ""
+                    vf["ep_num"] = None
+
+                if ep:
+                    expected_name = f"{emby_title} - S{season_num:02d}{ep}.{ext}"
+                else:
+                    if len(video_files) > 1:
+                        file_idx = video_files.index(vf) + 1
+                        expected_name = f"{emby_title} - Part {file_idx} - {orig_name}"
                     else:
                         expected_name = f"{emby_title} - {orig_name}"
-            else:
-                path = search_path
-                mtype = search_type
-                emby_title = search_emby_title
-                if len(video_files) > 1:
-                    file_idx = video_files.index(vf) + 1
-                    if mtype == "movie":
-                        expected_name = f"{emby_title} - Part {file_idx}.{ext}"
-                    else:
-                        season_num = self.parse_season(search_title, orig_name, *parent_folders)
-                        ep = self.guess_episode(orig_name)
-                        if ep:
-                            expected_name = f"{emby_title} - S{season_num:02d}{ep}.{ext}"
-                            m_ep = re.match(r'^E(\d+)$', ep, re.IGNORECASE)
-                            if m_ep:
-                                vf["ep_num"] = int(m_ep.group(1))
-                        else:
-                            expected_name = f"{emby_title} - Part {file_idx} - {orig_name}"
-                else:
-                    if mtype == "movie":
-                        expected_name = f"{emby_title}.{ext}"
-                    else: # tv
-                        season_num = self.parse_season(search_title, orig_name, *parent_folders)
-                        ep = self.guess_episode(orig_name)
-                        if ep:
-                            expected_name = f"{emby_title} - S{season_num:02d}{ep}.{ext}"
-                            m_ep = re.match(r'^E(\d+)$', ep, re.IGNORECASE)
-                            if m_ep:
-                                vf["ep_num"] = int(m_ep.group(1))
-                        else:
-                            expected_name = f"{emby_title} - {orig_name}"
 
             vf["target_path"] = path
             vf["expected_name"] = expected_name
@@ -502,18 +491,30 @@ class Processor:
             except Exception as e:
                 print(f"Error listing target folder {target_folder_id}: {e}")
                 
-            existing_sizes = {item.get("size") for item in existing_items if item.get("file_type") == 1}
-            existing_names = {item.get("file_name").lower() for item in existing_items}
-            
             files_to_save = []
             for file_item in files_list:
                 orig_name = file_item.get("file_name")
                 expected_name = file_item["expected_name"]
                 size = file_item.get("size")
                 
-                if size in existing_sizes or expected_name.lower() in existing_names or orig_name.lower() in existing_names:
+                # Check duplicate by comparing size or names
+                matched_existing = None
+                for ext_item in existing_items:
+                    if ext_item.get("file_type") != 1:
+                        continue
+                    if ext_item.get("size") == size or ext_item.get("file_name").lower() == expected_name.lower() or ext_item.get("file_name").lower() == orig_name.lower():
+                        matched_existing = ext_item
+                        break
+                        
+                if matched_existing:
                     print(f"Skipping duplicate file: {orig_name} (Size: {size})")
+                    # Correct old filename if it does not match standard expected name (consistent naming for supplementary batches)
+                    current_name = matched_existing.get("file_name")
+                    if current_name != expected_name:
+                        print(f"Correcting name of existing file in target folder: '{current_name}' -> '{expected_name}'")
+                        self.quark.rename_file(matched_existing.get("fid"), expected_name)
                     continue
+                    
                 files_to_save.append(file_item)
                 
             if not files_to_save:
