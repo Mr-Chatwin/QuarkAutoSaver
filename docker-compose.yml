@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  quark-auto-saver:
+    build: .
+    container_name: quark-auto-saver
+    restart: always
+    ports:
+      - "8081:8000"
+    volumes:
+      - ./.env:/app/.env
+    depends_on:
+      - pansou
+
+  pansou:
+    image: ghcr.io/fish2018/pansou-web:latest
+    container_name: pansou
+    restart: always
+    ports:
+      - "8082:80"
